@@ -1,6 +1,7 @@
 // https://auth0.com/blog/critical-vulnerabilities-in-json-web-token-libraries/
 
 const now = Math.floor(Date.now() / 1000);
+const supportedAlgorithms = ['HS256', 'HS384', 'HS512'];
 const payload = { sub: 'koikibabatunde14@gmail.com', iat: now };
 const key = 'secretkey';
 const SEC_MS = 1000;
@@ -42,7 +43,6 @@ const getKey = async (key, type, algorithm) => {
         throw new Error('Invalid key type');
     }
 
-    const supportedAlgorithms = ['HS256', 'HS384', 'HS512'];
     if (!supportedAlgorithms.includes(algorithm)) {
         throw new Error('Invalid algorithm');
     }
@@ -52,6 +52,8 @@ const getKey = async (key, type, algorithm) => {
         hash = 'SHA-384';
     } else if (algorithm === 'HS512') {
         hash = 'SHA-512';
+    } else {
+        hash = 'SHA-256';
     }
 
     const k = await crypto.subtle.importKey(
@@ -157,7 +159,7 @@ const verifyTokenExpiry = (exp, iat) => {
     }
 }
 
-const signToken = async (payload, key, exp) => {
+const signToken = async (payload, key, algorithm, exp) => {
     if (!exp) {
         exp = payload.exp ? computeExpiry(payload.exp) : Math.floor(Date.now() / 1000) + 3600;
     }
@@ -167,14 +169,14 @@ const signToken = async (payload, key, exp) => {
 
     payload.exp = exp;
 
-    const header = { alg: 'HS256', typ: 'JWT' };
+    const header = { alg: algorithm, typ: 'JWT' };
     const encodedHeader = base64URLencode(JSON.stringify(header));
     const encodedPayload = base64URLencode(JSON.stringify(payload));
     const unsignedToken = `${encodedHeader}.${encodedPayload}`;
     const unsignedTokenArr = new TextEncoder().encode(unsignedToken);
 
     // Import the key
-    const k = await getKey(key, 'sign', 'HS256');
+    const k = await getKey(key, 'sign', algorithm);
 
     // Generate the signature
     const signature = await crypto.subtle.sign('HMAC', k, unsignedTokenArr);
@@ -187,8 +189,14 @@ const signToken = async (payload, key, exp) => {
 
 const verifyToken = async (token, key) => {
     const [encodedHeader, encodedPayload, encodedSignature] = token.split('.');
+    const header = JSON.parse(base64URLDecode(encodedHeader));
     const unsignedToken = `${encodedHeader}.${encodedPayload}`;
-    const k = await getKey(key, 'verify', 'HS256');
+    let k
+    try {
+        k = await getKey(key, 'verify', header.alg);
+    } catch (err) {
+        throw new Error('Invalid token');
+    }
     const signature = base64URLToBuffer(encodedSignature);
     const unsignedTokenArr = new TextEncoder().encode(unsignedToken);
     const result = await crypto.subtle.verify('HMAC', k, signature, unsignedTokenArr);
@@ -198,6 +206,9 @@ const verifyToken = async (token, key) => {
 const decodeToken = token => {
     const [encodedHeader, encodedPayload, _] = token.split('.');
     const header = JSON.parse(base64URLDecode(encodedHeader));
+    if (!header.alg || !supportedAlgorithms.includes(header.alg)) {
+        throw new Error('Invalid token');
+    }
     const payload = JSON.parse(base64URLDecode(encodedPayload));
     const exp = payload.exp;
     if (!exp) {
@@ -212,12 +223,33 @@ const waitFor = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // Generate the token
 
-const oneHrTime = Date.now() + HOUR_MS;
-signToken(payload, key, Math.floor(oneHrTime/SEC_MS))
+const regenerateTokenWithDifferentAlgorithm = (token) => {
+    const [_, encodedPayload, encodedSignature] = token.split('.');
+    const updatedHeader = { alg: 'HS3841', typ: 'JWT' };
+    const updatedEncodedHeader = base64URLencode(JSON.stringify(updatedHeader));
+    return`${updatedEncodedHeader}.${encodedPayload}.${encodedSignature}`;
+}
+
+const oneHrTimeSec = (Date.now() + HOUR_MS)/SEC_MS;
+signToken(payload, key, 'HS256', Math.floor(oneHrTimeSec))
     .then(async token => {
         console.log(token);
-        // wait for the token to expire
-        await waitFor(2000);
+        // if we tamper with the token's header's alg claim it will throw an error
+        // regenerate the token header with a different algorithm
+        // try to decode the token
+        const updatedToken = regenerateTokenWithDifferentAlgorithm(token);
+        try {
+            console.log(decodeToken(updatedToken));
+        } catch (err) {
+            console.error(err);
+        }
+
+        try {
+            const t = await verifyToken(updatedToken, key);
+            console.log(t, '245');
+        } catch (err) {
+            console.error(err);
+        }
 
         console.log(decodeToken(token));
 
